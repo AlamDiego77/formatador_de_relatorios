@@ -3,6 +3,64 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, Border, Side
+from datetime import datetime, timedelta, time
+
+# --- Funções Auxiliares para Cálculo de Tempo ---
+
+def parse_time_to_timedelta(time_val):
+    """Converte um valor de tempo (string HH:MM, datetime.time ou datetime.datetime) para um objeto timedelta."""
+    if pd.isna(time_val):
+        return None
+    
+    if isinstance(time_val, str):
+        try:
+            # Tenta converter diretamente de string HH:MM
+            hours, minutes = map(int, time_val.split(":"))
+            return timedelta(hours=hours, minutes=minutes)
+        except ValueError:
+            # Se falhar, tenta como datetime completo e extrai o tempo
+            try:
+                dt_obj = pd.to_datetime(time_val)
+                return timedelta(hours=dt_obj.hour, minutes=dt_obj.minute)
+            except Exception:
+                return None
+    elif isinstance(time_val, (datetime, time)):
+        # Se já for um objeto datetime ou time, extrai horas e minutos
+        return timedelta(hours=time_val.hour, minutes=time_val.minute)
+    else:
+        return None
+
+def format_timedelta_to_hhmm(td):
+    """Formata um objeto timedelta para uma string HH:MM."""
+    if td is None:
+        return ""
+    total_seconds = int(td.total_seconds())
+    if total_seconds < 0: 
+        return "00:00" # Garante que não haja tempo negativo
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}"
+
+def calculate_time_overlap(start1_td, end1_td, start2_td, end2_td):
+    """Calcula a sobreposição de dois intervalos de tempo (timedelta)."""
+    if any(t is None for t in [start1_td, end1_td, start2_td, end2_td]):
+        return timedelta(0)
+
+    # Garante que os intervalos são válidos (fim >= inicio)
+    # Se o fim for antes do início, o intervalo é inválido para cálculo de duração positiva
+    if end1_td < start1_td or end2_td < start2_td:
+        return timedelta(0) 
+
+    # Encontra o início do período de sobreposição
+    overlap_start = max(start1_td, start2_td)
+    # Encontra o fim do período de sobreposição
+    overlap_end = min(end1_td, end2_td)
+
+    # Se houver sobreposição, calcula a duração
+    if overlap_end > overlap_start:
+        return overlap_end - overlap_start
+    else:
+        return timedelta(0)
 
 # --- 1. CONFIGURAÇÃO E ESTILOS ---
 
@@ -57,7 +115,7 @@ for nome_arquivo in os.listdir(pasta_dados):
         # --- APLICAÇÃO DA REGRA: REMOVER COLUNA "TITULO" ---
         if "Titulo" in df.columns:
             df = df.drop(columns=["Titulo"])
-            print(f"  - Coluna \"Titulo\" removida do arquivo {nome_arquivo}.")
+            print(f"  - Coluna \"Titulo\" removida do arquivo {nome_arquivo}. Dados deslocados para a esquerda.")
 
         # --- REORDENAR COLUNAS PARA CORRESPONDER AO MODELO ---
         # Cria um novo DataFrame com as colunas na ordem do modelo.
@@ -71,12 +129,50 @@ for nome_arquivo in os.listdir(pasta_dados):
         
         # --- APLICAÇÃO DA REGRA DE NEGÓCIO: "MATRIZ TI - Cuiabá" ---
         if not df_reordenado.empty:
-            # As colunas agora estão na ordem do modelo, então podemos usar os nomes diretamente
             df_reordenado.loc[df_reordenado["LOJA"] == "MATRIZ TI - Cuiabá", ["ABERTURA", "FECHAMENTO"]] = ["06:00", "22:00"]
             print(f"  - Regra \"MATRIZ TI - Cuiabá\" aplicada no arquivo {nome_arquivo}.")
 
+        # --- CÁLCULO DE IMPACTO E DISPONIBILIDADE ---
+        # Itera sobre as linhas do DataFrame reordenado para calcular Impacto e Disponibilidade
+        for index, row in df_reordenado.iterrows():
+            abertura_td = parse_time_to_timedelta(row["ABERTURA"])
+            fechamento_td = parse_time_to_timedelta(row["FECHAMENTO"])
+            inicio_incidente_td = parse_time_to_timedelta(row["INICIO"])
+            fim_incidente_td = parse_time_to_timedelta(row["FIM"])
+
+            # Validação de dados irregulares (Fim < Inicio)
+            if inicio_incidente_td is not None and fim_incidente_td is not None and fim_incidente_td < inicio_incidente_td:
+                print(f"  - Dados de incidente irregulares (Fim < Início) na linha {index} do arquivo {nome_arquivo}. Impacto e Disponibilidade serão vazios.")
+                df_reordenado.at[index, "IMPACTO"] = ""
+                df_reordenado.at[index, "DISPONIBILIDADE"] = ""
+                continue # Pula para a próxima linha se os dados forem irregulares
+
+            # Cálculo da duração do expediente
+            expediente_duracao = timedelta(0)
+            if abertura_td is not None and fechamento_td is not None:
+                expediente_duracao = fechamento_td - abertura_td
+
+            # Cálculo do impacto
+            impacto_duracao = timedelta(0)
+            if inicio_incidente_td is not None and fim_incidente_td is not None and abertura_td is not None and fechamento_td is not None:
+                # Limita o incidente ao horário de expediente
+                incidente_inicio_efetivo = max(inicio_incidente_td, abertura_td)
+                incidente_fim_efetivo = min(fim_incidente_td, fechamento_td)
+                
+                if incidente_fim_efetivo > incidente_inicio_efetivo:
+                    impacto_duracao = incidente_fim_efetivo - incidente_inicio_efetivo
+
+            # Cálculo da disponibilidade
+            disponibilidade_duracao = expediente_duracao - impacto_duracao
+
+            df_reordenado.at[index, "IMPACTO"] = format_timedelta_to_hhmm(impacto_duracao)
+            df_reordenado.at[index, "DISPONIBILIDADE"] = format_timedelta_to_hhmm(disponibilidade_duracao)
+
+        print(f"  - Cálculos de Impacto e Disponibilidade concluídos para o arquivo {nome_arquivo}.")
+
         # --- INSERÇÃO E FORMATAÇÃO (com Openpyxl) ---
-        # Itera sobre as linhas do DataFrame REORDENADO
+        # Itera sobre as linhas do DataFrame REORDENADO (agora com Impacto/Disponibilidade calculados) 
+        # e adiciona ao modelo
         for linha_dados in dataframe_to_rows(df_reordenado, index=False, header=False):
             # Adiciona a linha de dados na posição correta
             for col_idx, valor_celula in enumerate(linha_dados, 1):
@@ -99,3 +195,4 @@ try:
     print(f"\n✅ Planilha final salva com sucesso como \'{arquivo_saida}\'")
 except Exception as e:
     print(f"\nERRO ao salvar o arquivo final: {e}")
+
