@@ -1,67 +1,101 @@
 import os
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, Border, Side
+
+# --- 1. CONFIGURAÇÃO E ESTILOS ---
 
 # Caminhos
 modelo_path = "modelo_incidentes_formatados.xlsx"
 pasta_dados = "dados_xlsx"
-saida_path = "Incidentes_Formatados_Final.xlsx"
+arquivo_saida = "Incidentes_Formatados_Final.xlsx"
 
-# Estilos base
+# Estilos base para aplicar nas novas linhas
 altura_linha = 75
-fonte_padrao = Font(name='Calibri', size=11)
-alinhamento_celula = Alignment(horizontal='center', vertical='center', wrap_text=True)
+fonte_padrao = Font(name="Calibri", size=11)
+alinhamento_celula = Alignment(horizontal="center", vertical="center", wrap_text=True)
 borda_padrao = Border(
-    left=Side(style='thin'), right=Side(style='thin'),
-    top=Side(style='thin'), bottom=Side(style='thin')
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin")
 )
 
-# Carrega modelo
-wb = load_workbook(modelo_path)
-ws = wb.active
+# --- CABEÇALHOS DO SEU MODELO (ORDEM EXATA) ---
+cabecalhos_modelo = [
+    "LOJA", "REGIONAL", "ABERTURA", "FECHAMENTO", "CAUSA", 
+    "TIPO", "STATUS", "LINK OPERANDO", "DATA", "INICIO", 
+    "FIM", "IMPACTO", "DISPONIBILIDADE", "SOLUÇÃO"
+]
 
-# Identifica onde começa a tabela (linha de cabeçalho + 1)
-linha_inicio = 2
-cabecalho_modelo = [cell.value for cell in ws[linha_inicio - 1] if cell.value]
+# --- 2. CARREGAMENTO DO MODELO ---
 
-# Lê e junta os dados de todos os arquivos
-todos_dados = pd.DataFrame()
-for nome_arq in os.listdir(pasta_dados):
-    if nome_arq.endswith(".xlsx"):
-        df = pd.read_excel(os.path.join(pasta_dados, nome_arq))
+try:
+    # Carrega o workbook modelo
+    wb = load_workbook(modelo_path)
+    ws = wb.active
+except FileNotFoundError:
+    print(f"ERRO: Arquivo modelo \'{modelo_path}\' não encontrado.")
+    exit()
+
+# --- 3. PROCESSAMENTO E INSERÇÃO DOS DADOS (Arquivo por Arquivo) ---
+
+# Define a linha inicial para inserção dos dados (linha 2, após o cabeçalho)
+linha_atual = 2
+print(f"Iniciando inserção de dados na planilha a partir da linha {linha_atual}...")
+
+# Processa cada arquivo de dados na pasta
+for nome_arquivo in os.listdir(pasta_dados):
+    if nome_arquivo.endswith(".xlsx"):
+        caminho_arquivo = os.path.join(pasta_dados, nome_arquivo)
+        print(f"Lendo arquivo: {nome_arquivo}")
+
+        # Lê a planilha com pandas
+        df = pd.read_excel(caminho_arquivo)
+
+        # --- APLICAÇÃO DA REGRA: REMOVER COLUNA "TITULO" ---
         if "Titulo" in df.columns:
             df = df.drop(columns=["Titulo"])
-        todos_dados = pd.concat([todos_dados, df], ignore_index=True)
+            print(f"  - Coluna \"Titulo\" removida do arquivo {nome_arquivo}.")
 
-# Remove linhas completamente vazias
-todos_dados = todos_dados.dropna(how='all')
+        # --- REORDENAR COLUNAS PARA CORRESPONDER AO MODELO ---
+        # Cria um novo DataFrame com as colunas na ordem do modelo.
+        # Se uma coluna do modelo não existir no df, ela será preenchida com NaN (vazio).
+        df_reordenado = pd.DataFrame(columns=cabecalhos_modelo)
+        for col in cabecalhos_modelo:
+            if col in df.columns:
+                df_reordenado[col] = df[col]
+            else:
+                df_reordenado[col] = None # Garante que a coluna exista e esteja vazia
+        
+        # --- APLICAÇÃO DA REGRA DE NEGÓCIO: "MATRIZ TI - Cuiabá" ---
+        if not df_reordenado.empty:
+            # As colunas agora estão na ordem do modelo, então podemos usar os nomes diretamente
+            df_reordenado.loc[df_reordenado["LOJA"] == "MATRIZ TI - Cuiabá", ["ABERTURA", "FECHAMENTO"]] = ["06:00", "22:00"]
+            print(f"  - Regra \"MATRIZ TI - Cuiabá\" aplicada no arquivo {nome_arquivo}.")
 
-# Reorganiza as colunas para seguir a ordem do modelo
-todos_dados = todos_dados[[col for col in cabecalho_modelo if col in todos_dados.columns]]
+        # --- INSERÇÃO E FORMATAÇÃO (com Openpyxl) ---
+        # Itera sobre as linhas do DataFrame REORDENADO
+        for linha_dados in dataframe_to_rows(df_reordenado, index=False, header=False):
+            # Adiciona a linha de dados na posição correta
+            for col_idx, valor_celula in enumerate(linha_dados, 1):
+                ws.cell(row=linha_atual, column=col_idx, value=valor_celula)
+            
+            # Aplica os estilos de formatação a essa nova linha
+            ws.row_dimensions[linha_atual].height = altura_linha
+            for celula in ws[linha_atual]:
+                celula.font = fonte_padrao
+                celula.alignment = alinhamento_celula
+                celula.border = borda_padrao
+                
+            # Incrementa o contador para a próxima linha
+            linha_atual += 1
 
-# Insere os dados um a um com formatação
-for i, row in todos_dados.iterrows():
-    linha_excel = linha_inicio + i
-    ws.insert_rows(linha_excel)
-    ws.row_dimensions[linha_excel].height = altura_linha
-    for j, col_name in enumerate(cabecalho_modelo):
-        valor = row[col_name] if col_name in row else ""
-        col_letter = get_column_letter(j + 1)
-        celula = ws[f"{col_letter}{linha_excel}"]
-        celula.value = valor
-        celula.font = fonte_padrao
-        celula.alignment = alinhamento_celula
-        celula.border = borda_padrao
+# --- 4. SALVAR O RESULTADO ---
 
-# Remove linhas em branco após a última inserção
-ultima_linha_usada = linha_inicio + len(todos_dados)
-total_linhas = ws.max_row
-
-if total_linhas > ultima_linha_usada:
-    ws.delete_rows(ultima_linha_usada, total_linhas - ultima_linha_usada)
-
-# Salva o resultado final
-wb.save(saida_path)
-print("✅ Arquivo final salvo como:", saida_path)
+try:
+    wb.save(arquivo_saida)
+    print(f"\n✅ Planilha final salva com sucesso como \'{arquivo_saida}\'")
+except Exception as e:
+    print(f"\nERRO ao salvar o arquivo final: {e}")
