@@ -170,23 +170,43 @@ for nome_arquivo in os.listdir(pasta_dados):
 
         print(f"  - Cálculos de Impacto e Disponibilidade concluídos para o arquivo {nome_arquivo}.")
 
+        # --- FILTRAR LINHAS COMPLETAMENTE VAZIAS ANTES DE ESCREVER ---
+        # Considera uma linha vazia se todas as colunas, exceto IMPACTO e DISPONIBILIDADE, forem vazias
+        colunas_para_verificar_vazio = [col for col in cabecalhos_modelo if col not in ["IMPACTO", "DISPONIBILIDADE"]]
+        
+        # Cria uma máscara booleana para identificar linhas que não são completamente vazias
+        # Uma linha é considerada não vazia se pelo menos uma das colunas essenciais tiver um valor não nulo/não vazio
+        # Preenche NaN com string vazia para que .strip() funcione e verifica se todas as colunas essenciais são vazias
+        mask_empty_essential_cols = df_reordenado[colunas_para_verificar_vazio].apply(lambda x: x.astype(str).str.strip() == '').all(axis=1)
+        df_reordenado_filtrado = df_reordenado[~mask_empty_essential_cols].copy()
+
         # --- INSERÇÃO E FORMATAÇÃO (com Openpyxl) ---
-        # Itera sobre as linhas do DataFrame REORDENADO (agora com Impacto/Disponibilidade calculados) 
-        # e adiciona ao modelo
-        for linha_dados in dataframe_to_rows(df_reordenado, index=False, header=False):
+        # Itera sobre as linhas do DataFrame REORDENADO E FILTRADO
+        for linha_dados in dataframe_to_rows(df_reordenado_filtrado, index=False, header=False):
             # Adiciona a linha de dados na posição correta
-            for col_idx, valor_celula in enumerate(linha_dados, 1):
+            # Garante que apenas as colunas definidas em cabecalhos_modelo sejam escritas
+            for col_idx, valor_celula in enumerate(linha_dados[:len(cabecalhos_modelo)], 1):
                 ws.cell(row=linha_atual, column=col_idx, value=valor_celula)
             
             # Aplica os estilos de formatação a essa nova linha
             ws.row_dimensions[linha_atual].height = altura_linha
-            for celula in ws[linha_atual]:
+            # Aplica estilo apenas às colunas que contêm dados (até o tamanho de cabecalhos_modelo)
+            for col_num in range(1, len(cabecalhos_modelo) + 1):
+                celula = ws.cell(row=linha_atual, column=col_num)
                 celula.font = fonte_padrao
                 celula.alignment = alinhamento_celula
                 celula.border = borda_padrao
                 
             # Incrementa o contador para a próxima linha
             linha_atual += 1
+
+# --- LIMPEZA FINAL: REMOVER LINHAS VAZIAS NO FINAL DA PLANILHA ---
+# Encontra a última linha com dados
+max_row = ws.max_row
+# Itera de baixo para cima, removendo linhas se todas as células estiverem vazias
+while max_row > 1 and all(ws.cell(row=max_row, column=col).value is None for col in range(1, ws.max_column + 1)):
+    ws.delete_rows(max_row)
+    max_row -= 1
 
 # --- 4. SALVAR O RESULTADO ---
 
@@ -195,4 +215,6 @@ try:
     print(f"\n✅ Planilha final salva com sucesso como \'{arquivo_saida}\'")
 except Exception as e:
     print(f"\nERRO ao salvar o arquivo final: {e}")
+
+
 
